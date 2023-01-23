@@ -6,15 +6,17 @@ import (
 )
 
 // The config to mock out an connection
-// A connection has two address represent two end points Addr1 and Addr2.
+// A connection has two address represent two endpoints Addr1 and Addr2.
 // Here we refer them as Addr1 and Addr2. They can be any string you would like.
 type ConnConfig struct {
-	Addr1      string
-	Addr2      string
-	Throughput uint
-	BufferSize uint
-	Latency    time.Duration
-	Loss       float32 // 0.01 = 1%
+	Addr1        string        // endpoint 1 address
+	Addr2        string        // endpoint 2 address
+	Throughput   uint          // throughput by packets/second
+	BufferSize   uint          // BufferSize used int connection. If it is not set, a default value will be computed.
+	Latency      time.Duration // Latency is the duration which the packet travels from endpoint 1 to endpoint 2.
+	Loss         float32       // loss rate, 0.01 = 1%
+	WriteTimeout time.Duration // set default timeout for writing, without timeout if zero
+	ReadTimeout  time.Duration // set default timeout for reading, without timeout if zero
 }
 
 // Mock network connection

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -13,9 +14,9 @@ import (
 
 var (
 	zeroTime      time.Time
-	ErrClosedConn error = errors.New("Connection is closed")
-	ErrNilPointer error = errors.New("Data pointer is nil")
-	ErrZeroLengh  error = errors.New("Zero length data to write")
+	ErrClosedConn error = errors.New("connection is closed")
+	ErrNilPointer error = errors.New("data pointer is nil")
+	ErrZeroLengh  error = errors.New("zero length data to write")
 	ErrUnknown    error = errors.New("UniConn unknown error")
 )
 
@@ -30,10 +31,12 @@ type UniConn struct {
 	localAddr  string
 	remoteAddr string
 
-	throughput uint
-	bufferSize uint
-	latency    time.Duration
-	loss       float32
+	throughput   uint
+	bufferSize   uint
+	latency      time.Duration
+	loss         float32
+	writeTimeout time.Duration // default timeout for writing
+	readTimeout  time.Duration // default timeout for reading
 
 	sendCh   chan *dataWithTime
 	bufferCh chan *dataWithTime
@@ -71,7 +74,8 @@ func NewUniConn(conf *ConnConfig) (*UniConn, error) {
 	}
 
 	uc := &UniConn{throughput: conf.Throughput, bufferSize: bufferSize, latency: conf.Latency, loss: conf.Loss,
-		sendCh: make(chan *dataWithTime), bufferCh: make(chan *dataWithTime, conf.BufferSize),
+		writeTimeout: conf.WriteTimeout, readTimeout: conf.ReadTimeout,
+		sendCh: make(chan *dataWithTime), bufferCh: make(chan *dataWithTime, bufferSize),
 		recvCh: make(chan *dataWithTime), localAddr: conf.Addr1, remoteAddr: conf.Addr2}
 
 	uc.closeWriteCtx, uc.closeWriteCtxCancel = context.WithCancel(context.Background())
@@ -93,13 +97,22 @@ func (uc *UniConn) Write(b []byte) (n int, err error) {
 		return 0, ErrZeroLengh
 	}
 
+	var timeoutCtx context.Context
+	var timeoutCancel context.CancelFunc
+	if uc.writeTimeout > 0 {
+		timeoutCtx, timeoutCancel = context.WithTimeout(uc.writeCtx, uc.writeTimeout)
+	} else {
+		timeoutCtx, timeoutCancel = context.WithCancel(uc.writeCtx)
+	}
+	defer timeoutCancel()
+
 	dt := &dataWithTime{data: b}
 	select {
-	case <-uc.writeCtx.Done(): // for one time deadline or for one time cancel
-		return 0, uc.writeCtx.Err()
-
 	case uc.sendCh <- dt:
 		uc.nSendPacket++
+
+	case <-timeoutCtx.Done():
+		return 0, timeoutCtx.Err()
 	}
 
 	return len(b), nil
@@ -113,7 +126,6 @@ func (uc *UniConn) randomLoss() bool {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -141,8 +153,6 @@ func (uc *UniConn) throughputRead() error {
 			}
 		}
 	}
-
-	return nil
 }
 
 // The routine to stimulate latency
@@ -190,15 +200,21 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 		}
 	}
 
+	var timeoutCtx context.Context
+	var timeoutCancel context.CancelFunc
+	if uc.readTimeout > 0 {
+		timeoutCtx, timeoutCancel = context.WithTimeout(uc.readCtx, uc.readTimeout)
+	} else {
+		timeoutCtx, timeoutCancel = context.WithCancel(uc.readCtx)
+	}
+	defer timeoutCancel()
+
 	for {
 		if err := uc.readCtx.Err(); err != nil {
 			return 0, err
 		}
 
 		select {
-		case <-uc.readCtx.Done():
-			return 0, uc.readCtx.Err()
-
 		case dt := <-uc.recvCh:
 			if dt != nil {
 				if len(dt.data) > len(b) {
@@ -216,9 +232,10 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 					float64(time.Since(dt.t))/float64(uc.nRecvPacket))
 
 				return n, nil
-
 			}
 
+		case <-timeoutCtx.Done():
+			return 0, timeoutCtx.Err()
 		}
 	}
 }
@@ -226,7 +243,6 @@ func (uc *UniConn) Read(b []byte) (n int, err error) {
 func (uc *UniConn) CloseWrite() error {
 	uc.closeWriteCtxCancel()
 	close(uc.sendCh)
-
 	return nil
 }
 
@@ -235,11 +251,17 @@ func (uc *UniConn) CloseRead() error {
 	return nil
 }
 
-func (uc *UniConn) LocalAddr() ClientAddr {
+func (uc *UniConn) Close() error {
+	uc.CloseWrite()
+	uc.CloseRead()
+	return nil
+}
+
+func (uc *UniConn) LocalAddr() net.Addr {
 	return ClientAddr{addr: uc.localAddr}
 }
 
-func (uc *UniConn) RemoteAddr() ClientAddr {
+func (uc *UniConn) RemoteAddr() net.Addr {
 	return ClientAddr{addr: uc.remoteAddr}
 }
 
